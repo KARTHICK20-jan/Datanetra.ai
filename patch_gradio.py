@@ -2,120 +2,135 @@
 Patches gradio 4.44.1 for Python 3.14 compatibility on Render.
 Run via: pip install -r requirements.txt && python patch_gradio.py
 """
-import os, sys, re
+import os, re, sys
 
-def find_file(pkg_name, filename):
+def get_pkg_file(import_name, subpath=None):
+    """Get path to an installed package file."""
+    import importlib, importlib.util
     try:
-        import importlib
-        mod = importlib.import_module(pkg_name)
-        base = os.path.dirname(mod.__file__)
-        path = os.path.join(base, filename)
-        if os.path.exists(path):
-            return path
+        spec = importlib.util.find_spec(import_name)
+        if spec and spec.origin:
+            base = os.path.dirname(spec.origin)
+            if subpath:
+                p = os.path.join(base, subpath)
+                return p if os.path.exists(p) else None
+            return spec.origin
     except Exception:
         pass
     return None
 
-def patch_file(path, old, new, label):
-    if not path or not os.path.exists(path):
-        print(f"  SKIP {label}: file not found")
-        return False
-    with open(path) as f:
-        src = f.read()
-    if old in src:
-        with open(path, 'w') as f:
-            f.write(src.replace(old, new, 1))
-        print(f"  OK   {label}")
-        return True
-    print(f"  MISS {label}: pattern not found")
-    return False
+def read(p): 
+    with open(p) as f: return f.read()
 
-# ── PATCH 1: blocks.py — remove localhost check ───────────────────────────────
-blocks_path = find_file('gradio', 'blocks.py')
-print(f"\nblocks.py: {blocks_path}")
+def write(p, s):
+    with open(p, 'w') as f: f.write(s)
 
-p1a = patch_file(blocks_path,
-    "and not networking.url_ok(self.local_url)\n            and not self.share\n        ):\n            raise ValueError(\n                \"When localhost is not accessible",
-    "and True  # patched\n            and not self.share\n        ):\n            pass  # raise removed by patch_gradio.py\n        if False:  # pragma: no cover\n            raise ValueError(\n                \"When localhost is not accessible",
-    "PATCH 1a: url_ok check bypassed")
+def patch(p, old, new, tag):
+    if not p or not os.path.exists(p): print(f"  SKIP {tag}: not found"); return False
+    s = read(p)
+    if old in s:
+        write(p, s.replace(old, new, 1))
+        print(f"  OK   {tag}"); return True
+    print(f"  MISS {tag}"); return False
 
-if not p1a:
-    # simpler: just remove the url_ok line entirely
-    patch_file(blocks_path,
+# ── Find paths ─────────────────────────────────────────────────────────────────
+gradio_dir  = os.path.dirname(get_pkg_file('gradio') or '')
+gcu_path    = get_pkg_file('gradio_client', 'utils.py') or \
+              get_pkg_file('gradio_client.utils')
+blocks_path = os.path.join(gradio_dir, 'blocks.py') if gradio_dir else None
+routes_path = os.path.join(gradio_dir, 'routes.py') if gradio_dir else None
+utils_path  = os.path.join(gradio_dir, 'utils.py')  if gradio_dir else None
+
+# Try harder to find gradio_client
+if not gcu_path:
+    try:
+        import gradio_client.utils as _gcu; gcu_path = _gcu.__file__
+    except Exception: pass
+
+print(f"blocks.py : {blocks_path}")
+print(f"routes.py : {routes_path}")
+print(f"utils.py  : {utils_path}")
+print(f"gcu/utils : {gcu_path}")
+
+# ── PATCH 1: blocks.py — bypass localhost check (ValueError) ──────────────────
+print("\n[PATCH 1] blocks.py localhost check")
+if not patch(blocks_path,
         "            and not networking.url_ok(self.local_url)\n",
         "            # and not networking.url_ok(self.local_url)  # patched\n",
-        "PATCH 1b: url_ok commented out")
-
-# ── PATCH 2: gradio_client/utils.py — handle bool schema ─────────────────────
-try:
-    import gradio_client.utils as _gcu
-    gcu_path = _gcu.__file__
-except Exception:
-    gcu_path = None
-print(f"\ngradio_client/utils.py: {gcu_path}")
-
-patch_file(gcu_path,
-    '    if "const" in schema:',
-    '    if not isinstance(schema, dict): return "Any"\n    if "const" in schema:',
-    "PATCH 2a: get_type dict guard")
-
-if gcu_path and os.path.exists(gcu_path):
-    with open(gcu_path) as f:
-        src = f.read()
-    if 'raise APIInfoParseError' in src:
-        src = src.replace(
-            'raise APIInfoParseError(f"Cannot parse schema {schema}")',
-            'return "Any"  # patched: was APIInfoParseError'
+        "url_ok line commented out"):
+    # Fallback: remove entire if block that raises ValueError
+    if blocks_path and os.path.exists(blocks_path):
+        s = read(blocks_path)
+        s2 = re.sub(
+            r"        if \(\n            _frontend\n.*?raise ValueError\(\n.*?localhost.*?\n.*?\)\n",
+            "        pass  # localhost check removed\n",
+            s, flags=re.DOTALL
         )
-        with open(gcu_path, 'w') as f:
-            f.write(src)
-        print("  OK   PATCH 2b: APIInfoParseError suppressed")
+        if s2 != s:
+            write(blocks_path, s2); print("  OK   url_ok block removed via regex")
+        else:
+            print("  MISS both patterns failed")
+
+# ── PATCH 2: gradio_client/utils.py — bool schema handling ───────────────────
+print("\n[PATCH 2] gradio_client/utils.py")
+if gcu_path and os.path.exists(gcu_path):
+    s = read(gcu_path)
+    changed = False
+    # 2a: dict guard in get_type
+    if 'if not isinstance(schema, dict)' not in s:
+        s = s.replace(
+            '    if "const" in schema:',
+            '    if not isinstance(schema, dict): return "Any"\n    if "const" in schema:'
+        )
+        changed = True; print("  OK   2a: dict guard in get_type")
+    # 2b: suppress all raise APIInfoParseError
+    # Replace each raise on its own line with a return on a new line
+    def _replace_raise(m):
+        indent = m.group(1)
+        return f"{indent}return \"Any\"  # patched: was APIInfoParseError\n"
+    s2 = re.sub(r'^(\s*)raise APIInfoParseError\([^)]+\)\n', _replace_raise, s, flags=re.MULTILINE)
+    if s2 != s:
+        s = s2; changed = True
+        count = len(re.findall(r'raise APIInfoParseError', read(gcu_path))) - len(re.findall(r'raise APIInfoParseError', s))
+        print(f"  OK   2b: APIInfoParseError raises replaced")
+    if changed:
+        write(gcu_path, s)
+else:
+    print("  SKIP: gcu/utils.py not found")
 
 # ── PATCH 3: routes.py — TemplateResponse keyword args ───────────────────────
-routes_path = find_file('gradio', 'routes.py')
-print(f"\nroutes.py: {routes_path}")
-
+print("\n[PATCH 3] routes.py TemplateResponse")
 if routes_path and os.path.exists(routes_path):
-    with open(routes_path) as f:
-        src = f.read()
-    # Fix TemplateResponse to use keyword args (new Starlette API)
-    patched = re.sub(
-        r'return templates\.TemplateResponse\(\s*\n(\s*)template,\s*\n\s*\{',
-        r'return templates.TemplateResponse(\n\1name=template,\n\1context={',
-        src
-    )
-    if patched != src:
-        with open(routes_path, 'w') as f:
-            f.write(patched)
-        print("  OK   PATCH 3: routes.py TemplateResponse keyword args")
+    s = read(routes_path)
+    if 'name=template' in s or 'name = template' in s:
+        print("  SKIP: already uses keyword args")
     else:
-        # Check if already using keyword args
-        if 'name=template' in src:
-            print("  SKIP PATCH 3: already uses keyword args")
+        s2 = re.sub(
+            r'return templates\.TemplateResponse\(\s*\n(\s*)template,(\s*)\n(\s*)\{',
+            r'return templates.TemplateResponse(\n\1name=template,\2\n\3context={',
+            s
+        )
+        if s2 != s:
+            write(routes_path, s2); print("  OK   TemplateResponse uses keyword args")
         else:
-            print("  MISS PATCH 3: TemplateResponse pattern not found")
+            print("  MISS: pattern not found (may be OK on this Starlette version)")
+else:
+    print("  SKIP: routes.py not found")
 
-# ── PATCH 4: gradio/utils.py — asyncio event loop ────────────────────────────
-utils_path = find_file('gradio', 'utils.py')
-print(f"\ngradio/utils.py: {utils_path}")
+# ── PATCH 4: gradio/utils.py — asyncio event_loop ────────────────────────────
+print("\n[PATCH 4] gradio/utils.py event_loop")
+OLD_LOOP = '    event_loop = asyncio.get_event_loop()\n'
+NEW_LOOP = (
+    '    try:\n'
+    '        event_loop = asyncio.get_event_loop()\n'
+    '    except RuntimeError:\n'
+    '        event_loop = asyncio.new_event_loop()\n'
+    '        asyncio.set_event_loop(event_loop)\n'
+)
+if not patch(utils_path, OLD_LOOP, NEW_LOOP, "asyncio event_loop RuntimeError fix"):
+    if utils_path and os.path.exists(utils_path):
+        s = read(utils_path)
+        if 'new_event_loop' in s:
+            print("  SKIP: already patched")
 
-if utils_path and os.path.exists(utils_path):
-    with open(utils_path) as f:
-        src = f.read()
-    old_loop = '    event_loop = asyncio.get_event_loop()'
-    new_loop = (
-        '    try:\n'
-        '        event_loop = asyncio.get_event_loop()\n'
-        '    except RuntimeError:\n'
-        '        event_loop = asyncio.new_event_loop()\n'
-        '        asyncio.set_event_loop(event_loop)'
-    )
-    if old_loop in src:
-        src = src.replace(old_loop, new_loop)
-        with open(utils_path, 'w') as f:
-            f.write(src)
-        print("  OK   PATCH 4: utils.py event_loop RuntimeError fix")
-    else:
-        print("  SKIP PATCH 4: pattern not found")
-
-print("\n=== patch_gradio.py done ===")
+print("\n=== patch_gradio.py complete ===")
