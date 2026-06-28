@@ -82,6 +82,50 @@ try:
 except Exception:
     pass
 
+# ── Patch installed routes.py + blocks.py on disk for Python 3.14 ────────────
+try:
+    import gradio.routes as _grm, gradio.blocks as _gbm, re as _rp
+    _NL = chr(10)  # newline character - avoids literal \n in strings
+    # Fix routes.py: TemplateResponse positional -> keyword args
+    _rp_src = open(_grm.__file__).read()
+    if 'name=template' not in _rp_src:
+        _rp_lines = _rp_src.split(_NL)
+        _out2 = []; _j = 0; _chg = False
+        while _j < len(_rp_lines):
+            _l = _rp_lines[_j]
+            if 'templates.TemplateResponse(' in _l and _j+1 < len(_rp_lines):
+                _nx = _rp_lines[_j+1]
+                if _nx.strip() in ('template,', 'template'):
+                    _id = len(_nx) - len(_nx.lstrip())
+                    _out2.append(_l)
+                    _out2.append((' '*_id) + 'name=template,')
+                    _j += 2
+                    if _j < len(_rp_lines) and _rp_lines[_j].strip() == '{':
+                        _id2 = len(_rp_lines[_j]) - len(_rp_lines[_j].lstrip())
+                        _out2.append((' '*_id2) + 'context={')
+                        _j += 1
+                    _chg = True
+                    continue
+            _out2.append(_l); _j += 1
+        if _chg:
+            open(_grm.__file__, 'w').write(_NL.join(_out2))
+            import importlib; importlib.reload(_grm)
+            print('OK Patched routes.py TemplateResponse')
+    # Fix blocks.py: remove localhost ValueError
+    _bp_src = open(_gbm.__file__).read()
+    _VE_OLD = '"When localhost is not accessible, a shareable link must be created.'
+    if _VE_OLD in _bp_src:
+        _bp2 = _rp.sub(
+            r'raise ValueError\([^)]*When localhost[^)]*\)',
+            'pass  # ValueError patched',
+            _bp_src
+        )
+        if _bp2 != _bp_src:
+            open(_gbm.__file__, 'w').write(_bp2)
+            print('OK Patched blocks.py localhost ValueError')
+except Exception as _dpe:
+    print('WARN disk patch error:', _dpe)
+
 # gradio/external_utils.py tries to import ImageClassificationOutputElement
 # which was removed in huggingface_hub > 0.20.x. We patch the module BEFORE
 # gradio loads so the import never fails — regardless of hfh version.
@@ -14997,13 +15041,55 @@ if __name__ == "__main__":
         max_size=20,
         api_open=False,
     )
-    demo.launch(
-    server_name="0.0.0.0",
-    server_port=_port,
-    show_error=True,
-    share=False,
-    max_threads=40,
-    ssl_verify=False,
-    show_api=False,
-    allowed_paths=["/tmp", tempfile.gettempdir(), os.path.join(tempfile.gettempdir(), "datanetra_reports")],
-)
+    # ── Launch with full Python 3.14 / Render fallback chain ─────────────────────
+import sys as _sys_launch
+
+def _launch_app():
+    # Attempt 1: Standard Gradio launch
+    try:
+        demo.launch(
+            server_name="0.0.0.0",
+            server_port=_port,
+            show_error=True,
+            share=False,
+            max_threads=40,
+            ssl_verify=False,
+            show_api=False,
+            allowed_paths=["/tmp", tempfile.gettempdir(),
+                           os.path.join(tempfile.gettempdir(), "datanetra_reports")],
+        )
+        return
+    except ValueError as _ve:
+        if 'localhost' in str(_ve) or 'shareable' in str(_ve):
+            print(f"⚠️  Gradio launch ValueError: {_ve} — trying uvicorn fallback")
+        else:
+            raise
+
+    # Attempt 2: Direct uvicorn (bypasses Gradio's localhost check)
+    try:
+        import uvicorn
+        # Build the Gradio ASGI app without launching
+        demo.queue(max_size=50)
+        _app = demo.app
+        if _app is None:
+            from gradio.routes import App
+            _app = App.create_app(demo)
+        print(f"🚀 Starting uvicorn on 0.0.0.0:{_port}")
+        uvicorn.run(_app, host="0.0.0.0", port=_port,
+                    log_level="warning", access_log=False)
+        return
+    except Exception as _uv_e:
+        print(f"⚠️  uvicorn fallback failed: {_uv_e}")
+
+    # Attempt 3: Force share=False with no url check via env var
+    try:
+        os.environ['GRADIO_SHARE'] = 'False'
+        os.environ['GRADIO_SERVER_NAME'] = '0.0.0.0'
+        os.environ['GRADIO_SERVER_PORT'] = str(_port)
+        demo.launch(server_name="0.0.0.0", server_port=_port,
+                    share=False, show_api=False, max_threads=40)
+    except Exception as _e3:
+        print(f"❌ All launch attempts failed: {_e3}")
+        raise SystemExit(1)
+
+_launch_app()
