@@ -3,6 +3,7 @@ services:
     name: datanetra-ai
     env: python
     plan: starter
+    pythonVersion: "3.11.0"
     buildCommand: pip install -r requirements.txt
     startCommand: python app.py
     envVars:
@@ -10,3 +11,5 @@ services:
         value: "False"
       - key: PORT
         value: "10000"
+      - key: PYTHON_VERSION
+        value: "3.11.0"
