@@ -49,6 +49,39 @@ try:
 except Exception:
     pass
 
+# ── Patch gradio networking.url_ok to return True (fixes localhost ValueError) ──
+try:
+    import gradio.networking as _gnet
+    _gnet.url_ok = lambda url: True
+except Exception:
+    pass
+
+# ── Patch Starlette TemplateResponse for Python 3.14 (fixes jinja2 TypeError) ──
+# Gradio calls templates.TemplateResponse(template_str, {"request": ..., ...})
+# New Starlette/Python 3.14 requires keyword args: name=template, context={...}
+try:
+    import starlette.templating as _stmpl
+    _orig_tmpl_resp = _stmpl.Jinja2Templates.TemplateResponse
+    def _patched_tmpl_resp(self, *args, **kwargs):
+        # If first arg is a string (template name) and second is a dict (context)
+        # convert to keyword args
+        _args = list(args)
+        if _args and isinstance(_args[0], str) and 'name' not in kwargs:
+            kwargs['name'] = _args.pop(0)
+        if _args and isinstance(_args[0], dict) and 'context' not in kwargs:
+            kwargs['context'] = _args.pop(0)
+        return _orig_tmpl_resp(self, *_args, **kwargs)
+    _stmpl.Jinja2Templates.TemplateResponse = _patched_tmpl_resp
+except Exception:
+    pass
+
+# ── Patch gradio blocks.py to remove localhost ValueError ──────────────────────
+try:
+    import gradio.networking as _gnet2
+    _gnet2.url_ok = lambda url: True  # Always report localhost as reachable
+except Exception:
+    pass
+
 # gradio/external_utils.py tries to import ImageClassificationOutputElement
 # which was removed in huggingface_hub > 0.20.x. We patch the module BEFORE
 # gradio loads so the import never fails — regardless of hfh version.
