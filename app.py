@@ -14964,42 +14964,13 @@ if __name__ == "__main__":
         max_size=20,
         api_open=False,
     )
-    # Render deployment launch
-import os as _os_launch2
-_os_launch2.environ['GRADIO_SERVER_NAME'] = '0.0.0.0'
-_os_launch2.environ['GRADIO_SERVER_PORT'] = str(_port)
-_os_launch2.environ['GRADIO_ROOT_PATH']   = ''
-
-# Patch gradio blocks.py launch to suppress the localhost check on Render
-try:
-    import gradio.blocks as _gb
-    _orig_launch = _gb.Blocks.launch
-    def _patched_launch(self, *a, **kw):
-        kw.setdefault('server_name', '0.0.0.0')
-        # Remove the check that raises ValueError about localhost
-        try:
-            return _orig_launch(self, *a, **kw)
-        except ValueError as _ve:
-            if 'localhost' in str(_ve) or 'shareable' in str(_ve):
-                # Launch with minimal settings
-                import uvicorn, gradio.networking as _gn
-                self._queue.start()
-                app = self.app
-                uvicorn.run(app, host='0.0.0.0', port=kw.get('server_port', _port),
-                           log_level='warning')
-            else:
-                raise
-    _gb.Blocks.launch = _patched_launch
-except Exception as _lp_e:
-    print(f"⚠️  launch patch: {_lp_e}")
-
-demo.launch(
-        server_name="0.0.0.0",
-        server_port=_port,
-        show_error=True,
-        share=False,
-        max_threads=40,
-        ssl_verify=False,
-        show_api=False,
-        allowed_paths=["/tmp", tempfile.gettempdir(), os.path.join(tempfile.gettempdir(), "datanetra_reports")],
-    )
+    demo.launch(
+    server_name="0.0.0.0",
+    server_port=_port,
+    show_error=True,
+    share=False,
+    max_threads=40,
+    ssl_verify=False,
+    show_api=False,
+    allowed_paths=["/tmp", tempfile.gettempdir(), os.path.join(tempfile.gettempdir(), "datanetra_reports")],
+)
