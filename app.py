@@ -4,6 +4,19 @@ import subprocess as _subp, sys as _sys, os as _os
 _os.environ.setdefault('GRADIO_ANALYTICS_ENABLED', 'False')
 
 # ── Patch gradio 4.44.1 to work with any huggingface_hub version ─────────────
+
+# ── Patch gradio_client json_schema_to_python_type (Python 3.14 compat) ───────
+try:
+    import gradio_client.utils as _gcu
+    _orig_gtype = getattr(_gcu, "get_type", None)
+    if _orig_gtype:
+        def _safe_gtype(schema):
+            if not isinstance(schema, dict): return "Any"
+            return _orig_gtype(schema)
+        _gcu.get_type = _safe_gtype
+except Exception as _gcp_e:
+    pass
+
 # gradio/external_utils.py tries to import ImageClassificationOutputElement
 # which was removed in huggingface_hub > 0.20.x. We patch the module BEFORE
 # gradio loads so the import never fails — regardless of hfh version.
