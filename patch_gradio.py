@@ -1,119 +1,121 @@
 """
-Patches gradio 4.44.1 installed files for Python 3.14 compatibility.
-Run after: pip install -r requirements.txt
-Usage: python patch_gradio.py
+Patches gradio 4.44.1 for Python 3.14 compatibility on Render.
+Run via: pip install -r requirements.txt && python patch_gradio.py
 """
 import os, sys, re
 
-def find_gradio_path():
-    import gradio
-    return os.path.dirname(gradio.__file__)
-
-gradio_path = find_gradio_path()
-print(f"Gradio path: {gradio_path}")
-
-# PATCH 1: Fix networking.url_ok to always return True on Render
-# This fixes the "localhost not accessible" ValueError
-networking_file = os.path.join(gradio_path, 'networking.py')
-with open(networking_file, 'r') as f:
-    src = f.read()
-
-old_url_ok = '''def url_ok(url: str) -> bool:
+def find_file(pkg_name, filename):
     try:
-        for _ in range(5):
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore")
-                r = httpx.head(url, timeout=3, verify=False)
-            if r.status_code in (200, 401, 302):  # 401 or 302 if auth is set
-                return True
-            time.sleep(0.500)
-    except (ConnectionError, httpx.ConnectError, httpx.TimeoutException):
-        return False
-    return False'''
+        import importlib
+        mod = importlib.import_module(pkg_name)
+        base = os.path.dirname(mod.__file__)
+        path = os.path.join(base, filename)
+        if os.path.exists(path):
+            return path
+    except Exception:
+        pass
+    return None
 
-new_url_ok = '''def url_ok(url: str) -> bool:
-    # Patched for Render deployment: always return True to skip localhost check
-    import os as _os_urlok
-    if _os_urlok.environ.get('RENDER') or _os_urlok.environ.get('PORT'):
+def patch_file(path, old, new, label):
+    if not path or not os.path.exists(path):
+        print(f"  SKIP {label}: file not found")
+        return False
+    with open(path) as f:
+        src = f.read()
+    if old in src:
+        with open(path, 'w') as f:
+            f.write(src.replace(old, new, 1))
+        print(f"  OK   {label}")
         return True
-    try:
-        for _ in range(5):
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore")
-                r = httpx.head(url, timeout=3, verify=False)
-            if r.status_code in (200, 401, 302):  # 401 or 302 if auth is set
-                return True
-            time.sleep(0.500)
-    except (ConnectionError, httpx.ConnectError, httpx.TimeoutException):
-        return False
-    return False'''
+    print(f"  MISS {label}: pattern not found")
+    return False
 
-if old_url_ok in src:
-    src = src.replace(old_url_ok, new_url_ok)
-    with open(networking_file, 'w') as f:
-        f.write(src)
-    print("✅ PATCH 1: networking.url_ok fixed")
-else:
-    print("⚠️  PATCH 1: url_ok pattern not found — trying alternate patch")
-    # Simpler patch: just replace the function body
-    src2 = re.sub(
-        r'(def url_ok\(url: str\) -> bool:)\n.*?return False\n',
-        r'\1\n    import os as _p; \n    if _p.environ.get("RENDER") or _p.environ.get("PORT"): return True\n    return False\n',
-        src, flags=re.DOTALL
-    )
-    if src2 != src:
-        with open(networking_file, 'w') as f:
-            f.write(src2)
-        print("✅ PATCH 1: networking.url_ok patched (alternate)")
+# ── PATCH 1: blocks.py — remove localhost check ───────────────────────────────
+blocks_path = find_file('gradio', 'blocks.py')
+print(f"\nblocks.py: {blocks_path}")
 
-# PATCH 2: Fix gradio_client utils for Python 3.14
-# TypeError: argument of type 'bool' is not iterable in _json_schema_to_python_type
+p1a = patch_file(blocks_path,
+    "and not networking.url_ok(self.local_url)\n            and not self.share\n        ):\n            raise ValueError(\n                \"When localhost is not accessible",
+    "and True  # patched\n            and not self.share\n        ):\n            pass  # raise removed by patch_gradio.py\n        if False:  # pragma: no cover\n            raise ValueError(\n                \"When localhost is not accessible",
+    "PATCH 1a: url_ok check bypassed")
+
+if not p1a:
+    # simpler: just remove the url_ok line entirely
+    patch_file(blocks_path,
+        "            and not networking.url_ok(self.local_url)\n",
+        "            # and not networking.url_ok(self.local_url)  # patched\n",
+        "PATCH 1b: url_ok commented out")
+
+# ── PATCH 2: gradio_client/utils.py — handle bool schema ─────────────────────
 try:
-    import gradio_client.utils as gcu_module
-    gcu_file = gcu_module.__file__
-    with open(gcu_file, 'r') as f:
-        gcu_src = f.read()
+    import gradio_client.utils as _gcu
+    gcu_path = _gcu.__file__
+except Exception:
+    gcu_path = None
+print(f"\ngradio_client/utils.py: {gcu_path}")
 
-    # Fix get_type function
-    old_get_type = '    if "const" in schema:'
-    new_get_type = '    if not isinstance(schema, dict): return "Any"\n    if "const" in schema:'
-    if old_get_type in gcu_src:
-        gcu_src = gcu_src.replace(old_get_type, new_get_type)
-        with open(gcu_file, 'w') as f:
-            f.write(gcu_src)
-        print("✅ PATCH 2: gradio_client get_type fixed")
+patch_file(gcu_path,
+    '    if "const" in schema:',
+    '    if not isinstance(schema, dict): return "Any"\n    if "const" in schema:',
+    "PATCH 2a: get_type dict guard")
+
+if gcu_path and os.path.exists(gcu_path):
+    with open(gcu_path) as f:
+        src = f.read()
+    if 'raise APIInfoParseError' in src:
+        src = src.replace(
+            'raise APIInfoParseError(f"Cannot parse schema {schema}")',
+            'return "Any"  # patched: was APIInfoParseError'
+        )
+        with open(gcu_path, 'w') as f:
+            f.write(src)
+        print("  OK   PATCH 2b: APIInfoParseError suppressed")
+
+# ── PATCH 3: routes.py — TemplateResponse keyword args ───────────────────────
+routes_path = find_file('gradio', 'routes.py')
+print(f"\nroutes.py: {routes_path}")
+
+if routes_path and os.path.exists(routes_path):
+    with open(routes_path) as f:
+        src = f.read()
+    # Fix TemplateResponse to use keyword args (new Starlette API)
+    patched = re.sub(
+        r'return templates\.TemplateResponse\(\s*\n(\s*)template,\s*\n\s*\{',
+        r'return templates.TemplateResponse(\n\1name=template,\n\1context={',
+        src
+    )
+    if patched != src:
+        with open(routes_path, 'w') as f:
+            f.write(patched)
+        print("  OK   PATCH 3: routes.py TemplateResponse keyword args")
     else:
-        print("⚠️  PATCH 2: get_type pattern not found")
-except Exception as e:
-    print(f"⚠️  PATCH 2 skipped: {e}")
+        # Check if already using keyword args
+        if 'name=template' in src:
+            print("  SKIP PATCH 3: already uses keyword args")
+        else:
+            print("  MISS PATCH 3: TemplateResponse pattern not found")
 
-# PATCH 3: Fix routes.py TemplateResponse for new Starlette API
-routes_file = os.path.join(gradio_path, 'routes.py')
-with open(routes_file, 'r') as f:
-    routes_src = f.read()
+# ── PATCH 4: gradio/utils.py — asyncio event loop ────────────────────────────
+utils_path = find_file('gradio', 'utils.py')
+print(f"\ngradio/utils.py: {utils_path}")
 
-old_tmpl = '''return templates.TemplateResponse(
-                    template,
-                    {
-                        "request": request,
-                        "config": config,
-                        "gradio_api_info": gradio_api_info,
-                    },
-                )'''
-new_tmpl = '''return templates.TemplateResponse(
-                    name=template,
-                    context={
-                        "request": request,
-                        "config": config,
-                        "gradio_api_info": gradio_api_info,
-                    },
-                )'''
-if old_tmpl in routes_src:
-    routes_src = routes_src.replace(old_tmpl, new_tmpl)
-    with open(routes_file, 'w') as f:
-        f.write(routes_src)
-    print("✅ PATCH 3: routes.py TemplateResponse fixed")
-else:
-    print("⚠️  PATCH 3: TemplateResponse pattern not found (may already be correct)")
+if utils_path and os.path.exists(utils_path):
+    with open(utils_path) as f:
+        src = f.read()
+    old_loop = '    event_loop = asyncio.get_event_loop()'
+    new_loop = (
+        '    try:\n'
+        '        event_loop = asyncio.get_event_loop()\n'
+        '    except RuntimeError:\n'
+        '        event_loop = asyncio.new_event_loop()\n'
+        '        asyncio.set_event_loop(event_loop)'
+    )
+    if old_loop in src:
+        src = src.replace(old_loop, new_loop)
+        with open(utils_path, 'w') as f:
+            f.write(src)
+        print("  OK   PATCH 4: utils.py event_loop RuntimeError fix")
+    else:
+        print("  SKIP PATCH 4: pattern not found")
 
-print("\n✅ All patches applied successfully")
+print("\n=== patch_gradio.py done ===")
