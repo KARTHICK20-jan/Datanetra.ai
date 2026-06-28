@@ -53,27 +53,33 @@ except Exception:
 try:
     import gradio.networking as _gnet
     _gnet.url_ok = lambda url: True
-except Exception:
-    pass
+    print('OK url_ok patched')
+except Exception as _ue:
+    print(f'WARN url_ok patch failed: {_ue}')
 
 # ── Patch Starlette TemplateResponse for Python 3.14 (fixes jinja2 TypeError) ──
-# Gradio calls templates.TemplateResponse(template_str, {"request": ..., ...})
-# New Starlette/Python 3.14 requires keyword args: name=template, context={...}
+# OLD Gradio call: TemplateResponse(template_name, {"request": req, "config": ...})
+# NEW Starlette API: TemplateResponse(request, name, context={...})
 try:
     import starlette.templating as _stmpl
     _orig_tmpl_resp = _stmpl.Jinja2Templates.TemplateResponse
     def _patched_tmpl_resp(self, *args, **kwargs):
-        # If first arg is a string (template name) and second is a dict (context)
-        # convert to keyword args
-        _args = list(args)
-        if _args and isinstance(_args[0], str) and 'name' not in kwargs:
-            kwargs['name'] = _args.pop(0)
-        if _args and isinstance(_args[0], dict) and 'context' not in kwargs:
-            kwargs['context'] = _args.pop(0)
-        return _orig_tmpl_resp(self, *_args, **kwargs)
+        _a = list(args)
+        # Old API: first arg=str(name), second arg=dict(context with "request" key)
+        if (_a and isinstance(_a[0], str) and
+                len(_a) > 1 and isinstance(_a[1], dict) and 'request' in _a[1]):
+            _name = _a[0]
+            _ctx  = _a[1]
+            _req  = _ctx.get('request')
+            # Build new-style context without the request key
+            _new_ctx = {k: v for k, v in _ctx.items() if k != 'request'}
+            return _orig_tmpl_resp(self, _req, _name, _new_ctx)
+        # Already new-style or unknown — pass through
+        return _orig_tmpl_resp(self, *_a, **kwargs)
     _stmpl.Jinja2Templates.TemplateResponse = _patched_tmpl_resp
-except Exception:
-    pass
+    print('OK TemplateResponse patched')
+except Exception as _te:
+    print(f'WARN TemplateResponse patch failed: {_te}')
 
 # ── Patch gradio blocks.py to remove localhost ValueError ──────────────────────
 try:
