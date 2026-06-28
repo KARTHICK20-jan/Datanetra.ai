@@ -5,16 +5,48 @@ _os.environ.setdefault('GRADIO_ANALYTICS_ENABLED', 'False')
 
 # ── Patch gradio 4.44.1 to work with any huggingface_hub version ─────────────
 
-# ── Patch gradio_client json_schema_to_python_type (Python 3.14 compat) ───────
+# ── Patch gradio_client + gradio routes for Python 3.14 compat ─────────────────
 try:
     import gradio_client.utils as _gcu
+    # Patch get_type to handle non-dict schemas
     _orig_gtype = getattr(_gcu, "get_type", None)
     if _orig_gtype:
         def _safe_gtype(schema):
             if not isinstance(schema, dict): return "Any"
             return _orig_gtype(schema)
         _gcu.get_type = _safe_gtype
+    # Patch _json_schema_to_python_type to never raise
+    _orig_jschema = getattr(_gcu, '_json_schema_to_python_type', None)
+    if _orig_jschema:
+        def _safe_jschema(schema, defs=None):
+            try:
+                if not isinstance(schema, dict): return "Any"
+                return _orig_jschema(schema, defs)
+            except Exception:
+                return "Any"
+        _gcu._json_schema_to_python_type = _safe_jschema
+    # Patch json_schema_to_python_type (public) too
+    _orig_jschema2 = getattr(_gcu, 'json_schema_to_python_type', None)
+    if _orig_jschema2:
+        def _safe_jschema2(schema, defs=None):
+            try:
+                return _orig_jschema2(schema, defs)
+            except Exception:
+                return "Any"
+        _gcu.json_schema_to_python_type = _safe_jschema2
 except Exception as _gcp_e:
+    pass
+
+# Patch gradio routes to suppress api_info errors
+try:
+    import gradio.routes as _gr_routes
+    _orig_api_info = getattr(_gr_routes, 'api_info', None)
+    if _orig_api_info:
+        def _safe_api_info(all_endpoints=False):
+            try: return _orig_api_info(all_endpoints)
+            except Exception: return {}
+        _gr_routes.api_info = _safe_api_info
+except Exception:
     pass
 
 # gradio/external_utils.py tries to import ImageClassificationOutputElement
@@ -14932,10 +14964,34 @@ if __name__ == "__main__":
         max_size=20,
         api_open=False,
     )
-    # Render deployment: set env vars before launch
+    # Render deployment launch
 import os as _os_launch2
 _os_launch2.environ['GRADIO_SERVER_NAME'] = '0.0.0.0'
 _os_launch2.environ['GRADIO_SERVER_PORT'] = str(_port)
+_os_launch2.environ['GRADIO_ROOT_PATH']   = ''
+
+# Patch gradio blocks.py launch to suppress the localhost check on Render
+try:
+    import gradio.blocks as _gb
+    _orig_launch = _gb.Blocks.launch
+    def _patched_launch(self, *a, **kw):
+        kw.setdefault('server_name', '0.0.0.0')
+        # Remove the check that raises ValueError about localhost
+        try:
+            return _orig_launch(self, *a, **kw)
+        except ValueError as _ve:
+            if 'localhost' in str(_ve) or 'shareable' in str(_ve):
+                # Launch with minimal settings
+                import uvicorn, gradio.networking as _gn
+                self._queue.start()
+                app = self.app
+                uvicorn.run(app, host='0.0.0.0', port=kw.get('server_port', _port),
+                           log_level='warning')
+            else:
+                raise
+    _gb.Blocks.launch = _patched_launch
+except Exception as _lp_e:
+    print(f"⚠️  launch patch: {_lp_e}")
 
 demo.launch(
         server_name="0.0.0.0",
@@ -14944,6 +15000,6 @@ demo.launch(
         share=False,
         max_threads=40,
         ssl_verify=False,
-        show_api=False,          # Disables /info endpoint — fixes Python 3.14 TypeError
+        show_api=False,
         allowed_paths=["/tmp", tempfile.gettempdir(), os.path.join(tempfile.gettempdir(), "datanetra_reports")],
     )
