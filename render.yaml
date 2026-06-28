@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: datanetra-ai
+    env: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    envVars:
+      - key: GRADIO_ANALYTICS_ENABLED
+        value: "False"
+      - key: PORT
+        value: "10000"
