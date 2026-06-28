@@ -14919,12 +14919,18 @@ if __name__ == "__main__":
         max_size=20,
         api_open=False,
     )
-    demo.launch(
+    # Render deployment: set env vars before launch
+import os as _os_launch2
+_os_launch2.environ['GRADIO_SERVER_NAME'] = '0.0.0.0'
+_os_launch2.environ['GRADIO_SERVER_PORT'] = str(_port)
+
+demo.launch(
         server_name="0.0.0.0",
         server_port=_port,
         show_error=True,
         share=False,
         max_threads=40,
         ssl_verify=False,
+        show_api=False,          # Disables /info endpoint — fixes Python 3.14 TypeError
         allowed_paths=["/tmp", tempfile.gettempdir(), os.path.join(tempfile.gettempdir(), "datanetra_reports")],
     )
